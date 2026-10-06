@@ -267,6 +267,17 @@ class ProjectBuilder:
             (``sdist`` or ``wheel``)
         :param config_settings: Config settings for the build backend
         """
+        return set(self._get_requires_for_build(distribution, config_settings))
+
+    def _get_requires_for_build(
+        self,
+        distribution: Distribution,
+        config_settings: ConfigSettings | None = None,
+    ) -> list[str]:
+        """
+        Return the backend-defined dependencies as an ordered list,
+        preserving the order declared by the backend.
+        """
         _ctx.log(f'Getting build dependencies for {distribution}...', kind=('step',))
         hook_name = f'get_requires_for_build_{distribution}'
 
@@ -277,7 +288,7 @@ class ProjectBuilder:
                 requires = self._hook.get_requires_for_build_sdist(config_settings)
             else:
                 requires = self._hook.get_requires_for_build_wheel(config_settings)
-            return set(requires)
+            return list(requires)
 
     def check_dependencies(
         self,

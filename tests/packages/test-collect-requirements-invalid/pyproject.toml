@@ -1,0 +1,4 @@
+[build-system]
+requires = ['valid-static-dep', 'this is invalid']
+build-backend = 'backend'
+backend-path = ['.']

@@ -1,0 +1,3 @@
+Add ``build.util.collect_requirements``, which merges static ``build-system.requires`` declarations with the dynamic
+``get_requires_for_build`` hook result by canonicalized package name, preserving the origin of each declaration and
+reporting invalid requirements with their source and index.

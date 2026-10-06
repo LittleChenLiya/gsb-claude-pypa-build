@@ -18,6 +18,8 @@ from ._exceptions import (
     BuildException,
     BuildSystemTableValidationError,
     FailedProcessError,
+    InvalidRequirementsError,
+    RequirementDeclarationError,
     TypoWarning,
 )
 from ._types import ConfigSettings as ConfigSettingsType
@@ -35,7 +37,9 @@ __all__ = [
     'ConfigSettingsType',
     'DistributionType',
     'FailedProcessError',
+    'InvalidRequirementsError',
     'ProjectBuilder',
+    'RequirementDeclarationError',
     'RunnerType',
     'TypoWarning',
     '__version__',
