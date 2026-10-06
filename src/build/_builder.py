@@ -10,6 +10,7 @@ __lazy_modules__ = {
     'zipfile',
     f'{__spec__.parent}._compat',
     f'{__spec__.parent}._exceptions',
+    f'{__spec__.parent}._requirements',
     f'{__spec__.parent}._util',
 }
 
@@ -31,6 +32,7 @@ from ._exceptions import (
     BuildSystemTableValidationError,
     TypoWarning,
 )
+from ._requirements import merge_requirements
 from ._util import check_dependency
 
 
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import NotRequired, Self
 
+    from ._requirements import CollectedRequirement
     from ._types import ConfigSettings, Distribution, StrPath, SubprocessRunner, TOMLValue
 
     # The validated ``[build-system]`` table.
@@ -268,8 +271,46 @@ class ProjectBuilder:
         :param config_settings: Config settings for the build backend
         """
         _ctx.log(f'Getting build dependencies for {distribution}...', kind=('step',))
-        hook_name = f'get_requires_for_build_{distribution}'
+        return set(self._call_get_requires_hook(distribution, config_settings))
 
+    def collect_requirements(
+        self,
+        distribution: Distribution,
+        config_settings: ConfigSettings | None = None,
+    ) -> dict[str, list[CollectedRequirement]]:
+        """
+        Collect the static and dynamic build requirements for a distribution,
+        merged by canonical package name.
+
+        The ``get_requires_for_build_<distribution>`` hook is invoked exactly
+        once. Its result (the ``'dynamic'`` source) is merged with the static
+        ``build-system.requires`` declarations (the ``'static'`` source) under
+        canonicalized (PEP 503) package names. Each entry preserves the
+        original PEP 508 requirement string -- including environment markers --
+        and records which source it came from.
+
+        Nothing is installed and no transitive resolution is performed.
+
+        :param distribution: Distribution to collect the requirements of
+            (``sdist``, ``wheel`` or ``editable``)
+        :param config_settings: Config settings for the build backend
+        :returns: Mapping of canonical package name to the list of
+            :class:`~build.CollectedRequirement` declared for it
+        :raises build.InvalidRequirementsError: If any declaration is not a
+            valid PEP 508 requirement. The error reports the source and index
+            of each offending entry; no merged mapping is returned in that
+            case.
+        """
+        _ctx.log(f'Collecting build requirements for {distribution}...', kind=('step',))
+        dynamic = self._call_get_requires_hook(distribution, config_settings)
+        return merge_requirements(self._build_system['requires'], dynamic)
+
+    def _call_get_requires_hook(
+        self,
+        distribution: Distribution,
+        config_settings: ConfigSettings | None = None,
+    ) -> list[str]:
+        hook_name = f'get_requires_for_build_{distribution}'
         with self._handle_backend(hook_name):
             if distribution == 'editable':
                 requires = self._hook.get_requires_for_build_editable(config_settings)
@@ -277,7 +318,7 @@ class ProjectBuilder:
                 requires = self._hook.get_requires_for_build_sdist(config_settings)
             else:
                 requires = self._hook.get_requires_for_build_wheel(config_settings)
-            return set(requires)
+            return list(requires)
 
     def check_dependencies(
         self,

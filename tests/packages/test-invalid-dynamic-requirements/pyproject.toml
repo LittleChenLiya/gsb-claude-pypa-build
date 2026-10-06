@@ -1,0 +1,8 @@
+[build-system]
+requires = [
+    "valid-static-dep",
+    "not a valid requirement !!!",
+    "another bad ;; one",
+]
+build-backend = "backend"
+backend-path = ["."]

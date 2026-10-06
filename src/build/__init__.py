@@ -8,6 +8,7 @@ from __future__ import annotations
 __lazy_modules__ = {
     f'{__spec__.parent}._builder',
     f'{__spec__.parent}._exceptions',
+    f'{__spec__.parent}._requirements',
     f'{__spec__.parent}._types',
     f'{__spec__.parent}._util',
 }
@@ -18,8 +19,10 @@ from ._exceptions import (
     BuildException,
     BuildSystemTableValidationError,
     FailedProcessError,
+    InvalidRequirementsError,
     TypoWarning,
 )
+from ._requirements import CollectedRequirement
 from ._types import ConfigSettings as ConfigSettingsType
 from ._types import Distribution as DistributionType
 from ._types import SubprocessRunner as RunnerType
@@ -32,9 +35,11 @@ __all__ = [
     'BuildBackendException',
     'BuildException',
     'BuildSystemTableValidationError',
+    'CollectedRequirement',
     'ConfigSettingsType',
     'DistributionType',
     'FailedProcessError',
+    'InvalidRequirementsError',
     'ProjectBuilder',
     'RunnerType',
     'TypoWarning',

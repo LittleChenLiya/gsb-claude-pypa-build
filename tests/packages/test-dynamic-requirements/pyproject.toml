@@ -1,0 +1,7 @@
+[build-system]
+requires = [
+    "static-only-dep >= 1.0",
+    "Shared-Pkg; python_version >= '3.10'",
+]
+build-backend = "backend"
+backend-path = ["."]
