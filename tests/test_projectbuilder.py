@@ -344,8 +344,21 @@ def test_build(mocker: pytest_mock.MockerFixture, package_test_flit: str, tmp_di
 
     builder = build.ProjectBuilder(package_test_flit)
 
-    hook.build_sdist.side_effect = ['dist.tar.gz', Exception]
-    hook.build_wheel.side_effect = ['dist.whl', Exception]
+    def write_artifact(name: str) -> Callable[..., str]:
+        def fake_hook(outdir: str, config_settings: Mapping[str, str] | None = None) -> str:  # noqa: ARG001
+            if fake_hook.called:
+                msg = 'second call'
+                raise RuntimeError(msg)
+            fake_hook.called = True
+            with open(os.path.join(outdir, name), 'wb') as f:
+                f.write(b'')
+            return name
+
+        fake_hook.called = False
+        return fake_hook
+
+    hook.build_sdist.side_effect = write_artifact('dist.tar.gz')
+    hook.build_wheel.side_effect = write_artifact('dist.whl')
 
     assert builder.build('sdist', tmp_dir) == os.path.join(tmp_dir, 'dist.tar.gz')
     hook.build_sdist.assert_called_with(tmp_dir, None)
@@ -394,7 +407,13 @@ def test_missing_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, package
     hook = mocker.patch('pyproject_hooks.BuildBackendHookCaller', autospec=True).return_value
 
     builder = build.ProjectBuilder(package_test_flit)
-    hook.build_sdist.return_value = 'dist.tar.gz'
+
+    def fake_build_sdist(outdir: str, config_settings: Mapping[str, str] | None = None) -> str:  # noqa: ARG001
+        with open(os.path.join(outdir, 'dist.tar.gz'), 'wb') as f:
+            f.write(b'')
+        return 'dist.tar.gz'
+
+    hook.build_sdist.side_effect = fake_build_sdist
     out = os.path.join(tmp_dir, 'out')
 
     builder.build('sdist', out)
@@ -402,15 +421,25 @@ def test_missing_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, package
     assert os.path.isdir(out)
 
 
-def test_relative_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, package_test_flit: str) -> None:  # noqa: ARG001
+def test_relative_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, package_test_flit: str) -> None:
     hook = mocker.patch('pyproject_hooks.BuildBackendHookCaller', autospec=True).return_value
 
     builder = build.ProjectBuilder(package_test_flit)
-    hook.build_sdist.return_value = 'dist.tar.gz'
 
-    builder.build('sdist', '.')
+    def fake_build_sdist(outdir: str, config_settings: Mapping[str, str] | None = None) -> str:  # noqa: ARG001
+        with open(os.path.join(outdir, 'dist.tar.gz'), 'wb') as f:
+            f.write(b'')
+        return 'dist.tar.gz'
 
-    hook.build_sdist.assert_called_with(os.path.abspath('.'), None)
+    hook.build_sdist.side_effect = fake_build_sdist
+
+    cwd = os.getcwd()
+    os.chdir(tmp_dir)
+    try:
+        builder.build('sdist', '.')
+        hook.build_sdist.assert_called_with(os.path.abspath('.'), None)
+    finally:
+        os.chdir(cwd)
 
 
 def test_build_not_dir_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, package_test_flit: str) -> None:
@@ -424,6 +453,65 @@ def test_build_not_dir_outdir(mocker: pytest_mock.MockerFixture, tmp_dir: str, p
 
     with pytest.raises(build.BuildException):
         builder.build('sdist', out)
+
+
+def test_build_wheel_valid_artifact(tmp_dir: str, package_test_path_escape: str) -> None:
+    builder = build.ProjectBuilder(package_test_path_escape)
+    out = os.path.join(tmp_dir, 'dist')
+
+    result = builder.build('wheel', out)
+
+    assert result == os.path.join(out, 'test_path_escape-1.0.0-py3-none-any.whl')
+    assert os.path.isfile(result)
+
+
+def test_build_wheel_parent_directory_escape_rejected(tmp_dir: str, package_test_path_escape: str) -> None:
+    # A pre-existing artifact outside the output directory must neither be
+    # delivered nor modified when the backend returns a ``..`` escape.
+    outside = os.path.join(tmp_dir, 'old.whl')
+    with open(outside, 'wb') as f:
+        f.write(b'sentinel')
+
+    builder = build.ProjectBuilder(package_test_path_escape)
+    out = os.path.join(tmp_dir, 'dist')
+
+    with pytest.raises(build.BuildException, match='escapes the output directory'):
+        builder.build('wheel', out, config_settings={'return-name': '../old.whl'})
+
+    with open(outside, 'rb') as f:
+        assert f.read() == b'sentinel'
+
+
+def test_build_wheel_symlink_escape_rejected(tmp_dir: str, package_test_path_escape: str) -> None:
+    # A symlink inside the output directory pointing outside of it must be
+    # rejected, and the external file must be left untouched.
+    outside = os.path.join(tmp_dir, 'external.whl')
+    with open(outside, 'wb') as f:
+        f.write(b'sentinel')
+
+    out = os.path.join(tmp_dir, 'dist')
+    os.makedirs(out)
+    try:
+        os.symlink(outside, os.path.join(out, 'linked.whl'))
+    except OSError:
+        pytest.skip('symlinks are not supported on this system')
+
+    builder = build.ProjectBuilder(package_test_path_escape)
+
+    with pytest.raises(build.BuildException, match='escapes the output directory'):
+        builder.build('wheel', out, config_settings={'return-name': 'linked.whl'})
+
+    with open(outside, 'rb') as f:
+        assert f.read() == b'sentinel'
+
+
+def test_build_wheel_missing_artifact_rejected(tmp_dir: str, package_test_path_escape: str) -> None:
+    # A backend returning the name of a file it never produced is rejected.
+    builder = build.ProjectBuilder(package_test_path_escape)
+    out = os.path.join(tmp_dir, 'dist')
+
+    with pytest.raises(build.BuildException, match='did not produce a file'):
+        builder.build('wheel', out, config_settings={'return-name': 'missing.whl'})
 
 
 @pytest.fixture(scope='session')

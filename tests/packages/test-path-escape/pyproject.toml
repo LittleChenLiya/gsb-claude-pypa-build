@@ -1,0 +1,4 @@
+[build-system]
+build-backend = 'backend_path_escape'
+backend-path = ['.']
+requires = []

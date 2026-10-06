@@ -161,6 +161,29 @@ def _validate_backend_path(source_dir: str, backend_paths: Sequence[str]) -> Non
             raise BuildSystemTableValidationError(msg)
 
 
+def _validate_build_artifact(outdir: str, basename: str) -> None:
+    """
+    Validate a build artifact path returned by the backend.
+
+    The backend-returned path is interpreted relative to ``outdir``; only a
+    real file inside that directory may be delivered. Paths escaping the
+    directory (via ``..`` or absolute paths) and symlinks pointing outside of
+    it are rejected. Pre-existing artifacts are never removed or modified.
+    """
+    real_outdir = os.path.normcase(os.path.realpath(outdir))
+    real_path = os.path.normcase(os.path.realpath(os.path.join(outdir, basename)))
+    try:
+        contained = os.path.commonpath((real_outdir, real_path)) == real_outdir
+    except ValueError:  # paths on different drives (Windows)
+        contained = False
+    if not contained:
+        msg = f'Backend returned a path that escapes the output directory: {basename!r}'
+        raise BuildException(msg)
+    if not os.path.isfile(real_path):
+        msg = f'Backend did not produce a file inside the output directory: {basename!r}'
+        raise BuildException(msg)
+
+
 def _wrap_subprocess_runner(runner: SubprocessRunner, env: env.IsolatedEnv) -> SubprocessRunner:
     def _invoke_wrapped_runner(
         cmd: Sequence[str], cwd: str | None = None, extra_environ: Mapping[str, str] | None = None
@@ -403,6 +426,9 @@ class ProjectBuilder:
 
         with self._handle_backend(hook_name):
             basename: str = callback(outdir, config_settings, **kwargs)
+
+        if hook_name.startswith('build_'):
+            _validate_build_artifact(outdir, basename)
 
         return os.path.join(outdir, basename)
 
