@@ -360,6 +360,79 @@ def test_build(mocker: pytest_mock.MockerFixture, package_test_flit: str, tmp_di
         builder.build('wheel', tmp_dir)
 
 
+def test_build_artifact_inside_outdir(package_test_artifact_escape: str, tmp_path: pathlib.Path) -> None:
+    # A legitimate wheel built inside the output directory is delivered, and
+    # pre-existing artifacts in the output directory are left untouched.
+    outdir = tmp_path / 'dist'
+    outdir.mkdir()
+    previous = outdir / 'previous.whl'
+    previous.write_bytes(b'previous artifact')
+
+    builder = build.ProjectBuilder(package_test_artifact_escape)
+    result = builder.build('wheel', outdir)
+
+    assert result == os.path.join(os.path.abspath(outdir), 'test_artifact_escape-1.0.0-py3-none-any.whl')
+    assert zipfile.is_zipfile(result)
+    assert previous.read_bytes() == b'previous artifact'
+
+
+def test_build_artifact_parent_escape_rejected(package_test_artifact_escape: str, tmp_path: pathlib.Path) -> None:
+    # A backend returning a path escaping the output directory via ``..`` is
+    # rejected, and the pre-existing file outside of it is left unchanged.
+    outdir = tmp_path / 'dist'
+    old_artifact = tmp_path / 'old.whl'
+    old_artifact.write_bytes(b'old artifact')
+
+    builder = build.ProjectBuilder(package_test_artifact_escape)
+    with pytest.raises(build.BuildException, match='outside of the output directory'):
+        builder.build('wheel', outdir, config_settings={'artifact-name': os.path.join('..', 'old.whl'), 'write-file': 'false'})
+
+    assert old_artifact.read_bytes() == b'old artifact'
+
+
+def test_build_artifact_symlink_escape_rejected(package_test_artifact_escape: str, tmp_path: pathlib.Path) -> None:
+    # A symlink inside the output directory pointing to a file outside of it
+    # is rejected, and the external file is left unchanged.
+    outdir = tmp_path / 'dist'
+    outdir.mkdir()
+    external = tmp_path / 'external.whl'
+    external.write_bytes(b'external artifact')
+    try:
+        os.symlink(external, outdir / 'linked.whl')
+    except OSError:
+        pytest.skip('symlinks are not supported on this platform')
+
+    builder = build.ProjectBuilder(package_test_artifact_escape)
+    with pytest.raises(build.BuildException, match='outside of the output directory'):
+        builder.build('wheel', outdir, config_settings={'artifact-name': 'linked.whl', 'write-file': 'false'})
+
+    assert external.read_bytes() == b'external artifact'
+    assert os.path.islink(outdir / 'linked.whl')
+
+
+def test_validate_artifact_path_symlink_escape(mocker: pytest_mock.MockerFixture, tmp_path: pathlib.Path) -> None:
+    # Deterministic variant of the symlink test for platforms where symlink
+    # creation is not permitted: simulate the symlink resolution directly.
+    outdir = tmp_path / 'dist'
+    outdir.mkdir()
+    external = tmp_path / 'external.whl'
+    external.write_bytes(b'external artifact')
+
+    real_realpath = os.path.realpath
+
+    def fake_realpath(path: str) -> str:
+        if os.path.basename(path) == 'linked.whl':
+            return str(external)
+        return real_realpath(path)
+
+    mocker.patch('os.path.realpath', side_effect=fake_realpath)
+
+    with pytest.raises(build.BuildException, match='outside of the output directory'):
+        build._builder._validate_artifact_path(str(outdir), 'linked.whl')
+
+    assert external.read_bytes() == b'external artifact'
+
+
 def test_default_backend(mocker: pytest_mock.MockerFixture, package_legacy: str) -> None:
     mocker.patch('pyproject_hooks.BuildBackendHookCaller', autospec=True)
 

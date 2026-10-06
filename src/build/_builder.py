@@ -161,6 +161,23 @@ def _validate_backend_path(source_dir: str, backend_paths: Sequence[str]) -> Non
             raise BuildSystemTableValidationError(msg)
 
 
+def _validate_artifact_path(outdir: str, basename: str) -> None:
+    """
+    Validate the artifact path returned by the backend.
+
+    The path is interpreted relative to ``outdir`` and must resolve to a
+    location inside it: paths escaping the output directory (e.g. via
+    ``..`` segments or absolute paths) and symlinks pointing outside of it
+    are rejected.  This is a pure check - nothing is created, moved, or
+    removed, so pre-existing artifacts are always left untouched.
+    """
+    outdir_real = os.path.realpath(outdir)
+    artifact_real = os.path.realpath(os.path.join(outdir_real, basename))
+    if artifact_real != outdir_real and not artifact_real.startswith(outdir_real + os.sep):
+        msg = f"Backend returned an artifact path '{basename}' that points outside of the output directory"
+        raise BuildException(msg)
+
+
 def _wrap_subprocess_runner(runner: SubprocessRunner, env: env.IsolatedEnv) -> SubprocessRunner:
     def _invoke_wrapped_runner(
         cmd: Sequence[str], cwd: str | None = None, extra_environ: Mapping[str, str] | None = None
@@ -403,6 +420,8 @@ class ProjectBuilder:
 
         with self._handle_backend(hook_name):
             basename: str = callback(outdir, config_settings, **kwargs)
+
+        _validate_artifact_path(outdir, basename)
 
         return os.path.join(outdir, basename)
 
