@@ -12,7 +12,7 @@ __lazy_modules__ = {
     f'{__spec__.parent}._util',
 }
 
-from ._builder import ProjectBuilder
+from ._builder import CapturedOutputRunner, ProjectBuilder
 from ._exceptions import (
     BuildBackendException,
     BuildException,
@@ -32,6 +32,7 @@ __all__ = [
     'BuildBackendException',
     'BuildException',
     'BuildSystemTableValidationError',
+    'CapturedOutputRunner',
     'ConfigSettingsType',
     'DistributionType',
     'FailedProcessError',

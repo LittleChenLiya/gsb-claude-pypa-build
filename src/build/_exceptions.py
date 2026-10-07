@@ -22,9 +22,22 @@ class BuildBackendException(Exception):
         self,
         exception: Exception,
         description: str | None = None,
+        *,
+        stdout: str | None = None,
+        stderr: str | None = None,
     ) -> None:
         super().__init__()
         self.exception: Exception = exception
+        self.stdout: str | None = stdout
+        """
+        The backend's captured standard output, if a capturing runner (such as
+        :class:`build.CapturedOutputRunner`) was used and the output was available.
+        """
+        self.stderr: str | None = stderr
+        """
+        The backend's captured standard error, if a capturing runner (such as
+        :class:`build.CapturedOutputRunner`) was used and the output was available.
+        """
         self._description = description
 
     def __str__(self) -> str:

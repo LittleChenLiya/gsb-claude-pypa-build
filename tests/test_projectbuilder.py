@@ -6,6 +6,7 @@ import copy
 import logging
 import os
 import pathlib
+import subprocess
 import sys
 import textwrap
 import typing
@@ -572,6 +573,170 @@ def test_runner_user_specified(tmp_dir: str, package_test_flit: str) -> None:
     builder = build.ProjectBuilder(package_test_flit, runner=dummy_runner)
     with pytest.raises(build.BuildBackendException, match='Runner was called'):
         builder.build('wheel', tmp_dir)
+
+
+def test_captured_output_runner_success(tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]) -> None:
+    runner = build.CapturedOutputRunner()
+
+    runner(
+        [sys.executable, '-c', "import sys; print('out-text'); print('err-text', file=sys.stderr)"],
+        cwd=str(tmp_path),
+        extra_environ={'PYTHON_BUILD_TEST_MARKER': '1'},
+    )
+
+    # both channels are captured separately
+    assert runner.stdout == 'out-text\n'
+    assert runner.stderr == 'err-text\n'
+    # nothing leaks to the terminal
+    captured = capfd.readouterr()
+    assert captured.out == ''
+    assert captured.err == ''
+
+
+def test_captured_output_runner_failure(tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]) -> None:
+    runner = build.CapturedOutputRunner()
+    cmd = [sys.executable, '-c', "import sys; print('out-text'); print('err-text', file=sys.stderr); sys.exit(3)"]
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        runner(cmd, cwd=str(tmp_path))
+
+    error = exc_info.value
+    # the exit code is preserved and both channels are attached to the error
+    assert error.returncode == 3
+    assert error.cmd == cmd
+    assert error.output == 'out-text\n'
+    assert error.stderr == 'err-text\n'
+    # ... and stored on the runner as well
+    assert runner.stdout == 'out-text\n'
+    assert runner.stderr == 'err-text\n'
+    captured = capfd.readouterr()
+    assert captured.out == ''
+    assert captured.err == ''
+
+
+def test_backend_exception_captured_streams(tmp_dir: str, package_test_flit: str) -> None:
+    def failing_runner(
+        cmd: typing.Sequence[str],
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        raise subprocess.CalledProcessError(1, cmd, output='stdout text', stderr='stderr text')
+
+    builder = build.ProjectBuilder(package_test_flit, runner=failing_runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    # captured channels are attached to the library error
+    assert exc.stdout == 'stdout text'
+    assert exc.stderr == 'stderr text'
+    # the exit code and the original exception causality are preserved
+    assert isinstance(exc.exception, subprocess.CalledProcessError)
+    assert exc.exception.returncode == 1
+    assert exc.__context__ is exc.exception
+
+
+def test_backend_exception_captured_streams_bytes(tmp_dir: str, package_test_flit: str) -> None:
+    def failing_runner(
+        cmd: typing.Sequence[str],
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        raise subprocess.CalledProcessError(2, cmd, output=b'stdout bytes', stderr=b'stderr bytes')
+
+    builder = build.ProjectBuilder(package_test_flit, runner=failing_runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    assert exc.stdout == 'stdout bytes'
+    assert exc.stderr == 'stderr bytes'
+    assert exc.exception.returncode == 2
+
+
+def test_backend_exception_runner_error_no_streams(tmp_dir: str, package_test_flit: str) -> None:
+    error = RuntimeError('runner exploded')
+
+    def failing_runner(
+        cmd: typing.Sequence[str],  # noqa: ARG001
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        raise error
+
+    builder = build.ProjectBuilder(package_test_flit, runner=failing_runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    # the original exception causality is preserved, no captured streams
+    assert exc.exception is error
+    assert exc.__context__ is error
+    assert exc.stdout is None
+    assert exc.stderr is None
+
+
+def test_captured_output_runner_hook_success(
+    package_test_setuptools: str,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    runner = build.CapturedOutputRunner()
+    builder = build.ProjectBuilder(package_test_setuptools, runner=runner)
+
+    requires = builder.get_requires_for_build('wheel')
+
+    assert isinstance(requires, set)
+    # the hook output was captured, not printed to the terminal
+    assert runner.stdout is not None
+    assert runner.stderr is not None
+    captured = capfd.readouterr()
+    assert captured.out == ''
+    assert captured.err == ''
+
+
+def test_captured_output_runner_hook_failure(tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / 'backend.py').write_text(
+        textwrap.dedent(
+            """\
+            import sys
+
+            def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+                print('backend out-text')
+                print('backend err-text', file=sys.stderr)
+                msg = 'backend exploded'
+                raise RuntimeError(msg)
+            """
+        ),
+        encoding='utf-8',
+    )
+    (tmp_path / 'pyproject.toml').write_text(
+        textwrap.dedent(
+            """\
+            [build-system]
+            requires = []
+            build-backend = "backend"
+            backend-path = ["."]
+            """
+        ),
+        encoding='utf-8',
+    )
+    runner = build.CapturedOutputRunner()
+    builder = build.ProjectBuilder(str(tmp_path), runner=runner)
+
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', str(tmp_path / 'dist'))
+
+    exc = exc_info.value
+    assert isinstance(exc.exception, subprocess.CalledProcessError)
+    assert exc.exception.returncode == 1
+    # both captured channels are attached to the library error
+    assert 'backend out-text' in (exc.stdout or '')
+    assert 'backend err-text' in (exc.stderr or '')
+    assert 'backend exploded' in (exc.stderr or '')
+    # nothing reached the terminal
+    captured = capfd.readouterr()
+    assert captured.out == ''
+    assert captured.err == ''
 
 
 def test_metadata_path_no_prepare(tmp_dir: str, package_test_no_prepare: str) -> None:
