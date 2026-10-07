@@ -1,0 +1,5 @@
+Add ``ProjectBuilder.get_available_hooks``, a read-only capability query that imports the backend without invoking any
+build hook and reports which PEP 517/660 hooks it implements. A backend that cannot be imported raises
+``BuildBackendException`` wrapping ``pyproject_hooks.BackendUnavailable``, keeping it distinct from a backend that
+merely lacks a hook; callers can use the report to know in advance whether metadata preparation will fall back to
+building a wheel.

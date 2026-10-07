@@ -5,7 +5,9 @@ from __future__ import annotations
 
 __lazy_modules__ = {
     'difflib',
+    'json',
     'subprocess',
+    'tempfile',
     'warnings',
     'zipfile',
     f'{__spec__.parent}._compat',
@@ -15,9 +17,11 @@ __lazy_modules__ = {
 
 import contextlib
 import difflib
+import json
 import os
 import subprocess
 import sys
+import tempfile
 import warnings
 import zipfile
 
@@ -295,6 +299,56 @@ class ProjectBuilder:
         """
         dependencies = self.get_requires_for_build(distribution, config_settings).union(self.build_system_requires)
         return {u for d in dependencies for u in check_dependency(d)}
+
+    def get_available_hooks(self) -> set[str]:
+        """
+        Report which PEP 517/660 hooks the backend provides, read-only.
+
+        The backend is imported in a subprocess -- the same way it is for a hook
+        call -- but no build hook is invoked, so this never triggers a build nor
+        writes any build output. In particular, it lets callers learn ahead of
+        time whether ``prepare_metadata_for_build_wheel`` is available and, if
+        not, that :meth:`metadata_path` will fall back to building a wheel.
+
+        :returns: The names of the hooks defined by the backend
+        :raises BuildBackendException: If the backend could not be imported
+            (wrapping :class:`pyproject_hooks.BackendUnavailable`); this is
+            distinct from a backend that imports fine but merely lacks a hook
+        """
+        _ctx.log('Checking backend hook availability...', kind=('step',))
+        extra_environ = {'_PYPROJECT_HOOKS_BUILD_BACKEND': self._backend}
+        if backend_path := self._hook.backend_path:
+            extra_environ['_PYPROJECT_HOOKS_BACKEND_PATH_JSON'] = json.dumps(backend_path)
+
+        probe = os.path.join(os.path.dirname(__file__), '_in_process', '_probe_hooks.py')
+
+        with tempfile.TemporaryDirectory() as control_dir:
+            try:
+                self._runner(
+                    [self._python_executable, probe, control_dir],
+                    self._source_dir,
+                    extra_environ,
+                )
+            except subprocess.CalledProcessError as exception:
+                raise BuildBackendException(
+                    exception,
+                    'Backend subprocess exited when trying to check available hooks',
+                ) from None
+            with open(os.path.join(control_dir, 'output.json'), encoding='utf-8') as f:
+                data = json.load(f)
+
+        if data.get('no_backend'):
+            raise BuildBackendException(
+                pyproject_hooks.BackendUnavailable(
+                    data.get('traceback', ''),
+                    message=data.get('backend_error', ''),
+                    backend_name=self._backend,
+                    backend_path=self._hook.backend_path,
+                ),
+                f'Backend {self._backend!r} is not available.',
+            ) from None
+
+        return set(data.get('hooks', ()))
 
     def prepare(
         self,

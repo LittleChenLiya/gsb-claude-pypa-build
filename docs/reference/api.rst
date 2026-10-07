@@ -83,6 +83,26 @@ Getting package metadata without building:
         metadata_dir = builder.metadata_path(tmpdir)
         # Read METADATA file from metadata_dir to extract package info
 
+Checking which backend hooks are available without building:
+
+``get_available_hooks`` imports the backend in a subprocess and reports the PEP 517/660 hooks it defines, without ever
+calling a hook (so no build is triggered and nothing is written). If the backend cannot be imported, it raises
+``BuildBackendException`` wrapping :class:`pyproject_hooks.BackendUnavailable`; this is distinct from a backend that
+imports fine but simply does not implement a hook. Use it, for example, to know ahead of time that
+``metadata_path`` will have to fall back to building a wheel:
+
+.. code-block:: python
+
+    from build import ProjectBuilder
+
+    builder = ProjectBuilder(".")
+    hooks = builder.get_available_hooks()
+    if "prepare_metadata_for_build_wheel" in hooks:
+        ...  # the backend provides metadata directly
+    else:
+        ...  # metadata_path() will build a wheel and extract the metadata
+
+
 Accessing build dependencies:
 
 .. code-block:: python
