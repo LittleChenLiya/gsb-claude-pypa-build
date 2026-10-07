@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import pathlib
+import subprocess
 import sys
 import textwrap
 import typing
@@ -572,6 +574,146 @@ def test_runner_user_specified(tmp_dir: str, package_test_flit: str) -> None:
     builder = build.ProjectBuilder(package_test_flit, runner=dummy_runner)
     with pytest.raises(build.BuildBackendException, match='Runner was called'):
         builder.build('wheel', tmp_dir)
+
+
+def test_fake_runner_success(tmp_dir: str, package_test_flit: str) -> None:
+    def fake_runner(
+        cmd: typing.Sequence[str],
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        # emulate the in-process hook script by writing its result file directly
+        with open(os.path.join(cmd[-1], 'output.json'), 'w', encoding='utf-8') as file:
+            json.dump({'return_val': 'dist.whl'}, file)
+
+    builder = build.ProjectBuilder(package_test_flit, runner=fake_runner)
+
+    assert builder.build('wheel', tmp_dir) == os.path.join(tmp_dir, 'dist.whl')
+
+
+@pytest.mark.parametrize(
+    ('stdout', 'stderr'),
+    [
+        ('captured stdout', 'captured stderr'),
+        (b'captured stdout', b'captured stderr'),
+    ],
+    ids=['str', 'bytes'],
+)
+def test_fake_runner_nonzero_exit(tmp_dir: str, package_test_flit: str, stdout: str | bytes, stderr: str | bytes) -> None:
+    def fake_runner(
+        cmd: typing.Sequence[str],
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        raise subprocess.CalledProcessError(2, cmd, output=stdout, stderr=stderr)
+
+    builder = build.ProjectBuilder(package_test_flit, runner=fake_runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    # both channels are attached to the library error, decoded if needed
+    assert exc.stdout == 'captured stdout'
+    assert exc.stderr == 'captured stderr'
+    # the exit code and the original exception are preserved as the cause
+    assert isinstance(exc.exception, subprocess.CalledProcessError)
+    assert exc.exception.returncode == 2
+    assert exc.exception.stdout == stdout
+    assert exc.exception.stderr == stderr
+
+
+def test_fake_runner_raises(tmp_dir: str, package_test_flit: str) -> None:
+    failure = RuntimeError('runner exploded')
+
+    def fake_runner(
+        cmd: typing.Sequence[str],  # noqa: ARG001
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        raise failure
+
+    builder = build.ProjectBuilder(package_test_flit, runner=fake_runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    # the original exception is preserved as the cause, no output was captured
+    assert exc.exception is failure
+    assert exc.stdout is None
+    assert exc.stderr is None
+
+
+def test_output_capture_runner_separates_streams(tmp_dir: str, capfd: pytest.CaptureFixture[str]) -> None:
+    runner = build.OutputCaptureRunner()
+
+    runner(
+        [sys.executable, '-c', "import sys; print('to stdout'); print('to stderr', file=sys.stderr)"],
+        cwd=tmp_dir,
+        extra_environ={'BUILD_TEST_MARKER': 'present'},
+    )
+
+    # stdout and stderr are captured separately, nothing leaks to the terminal
+    assert runner.stdout.splitlines() == ['to stdout']
+    assert runner.stderr.splitlines() == ['to stderr']
+    assert capfd.readouterr() == ('', '')
+
+
+def test_output_capture_runner_extra_environ() -> None:
+    runner = build.OutputCaptureRunner()
+
+    runner(
+        [sys.executable, '-c', "import os; print(os.environ['BUILD_TEST_MARKER'])"],
+        extra_environ={'BUILD_TEST_MARKER': 'present'},
+    )
+
+    assert runner.stdout.splitlines() == ['present']
+
+
+def test_output_capture_runner_nonzero_exit(tmp_dir: str) -> None:
+    runner = build.OutputCaptureRunner()
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        runner(
+            [sys.executable, '-c', "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"],
+            cwd=tmp_dir,
+        )
+
+    # the exit code and both channels are preserved on the raised error
+    error = exc_info.value
+    assert error.returncode == 3
+    assert error.stdout.splitlines() == ['out']
+    assert error.stderr.splitlines() == ['err']
+    assert runner.stdout.splitlines() == ['out']
+    assert runner.stderr.splitlines() == ['err']
+
+
+def test_output_capture_runner_via_project_builder(
+    mocker: pytest_mock.MockerFixture, tmp_dir: str, package_test_flit: str, capfd: pytest.CaptureFixture[str]
+) -> None:
+    hook = mocker.patch('pyproject_hooks.BuildBackendHookCaller', autospec=True).return_value
+    runner = build.OutputCaptureRunner()
+
+    def build_wheel(
+        outdir: str,  # noqa: ARG001
+        config_settings: typing.Mapping[str, str] | None,  # noqa: ARG001
+        **kwargs: object,  # noqa: ARG001
+    ) -> None:
+        runner([sys.executable, '-c', "import sys; print('out'); print('err', file=sys.stderr); sys.exit(1)"])
+
+    hook.build_wheel.side_effect = build_wheel
+
+    builder = build.ProjectBuilder(package_test_flit, runner=runner)
+    with pytest.raises(build.BuildBackendException) as exc_info:
+        builder.build('wheel', tmp_dir)
+
+    exc = exc_info.value
+    # both channels are attached to the library error, the exit code and cause are preserved
+    assert exc.stdout.splitlines() == ['out']
+    assert exc.stderr.splitlines() == ['err']
+    assert isinstance(exc.exception, subprocess.CalledProcessError)
+    assert exc.exception.returncode == 1
+    # nothing was written to the terminal
+    assert capfd.readouterr() == ('', '')
 
 
 def test_metadata_path_no_prepare(tmp_dir: str, package_test_no_prepare: str) -> None:

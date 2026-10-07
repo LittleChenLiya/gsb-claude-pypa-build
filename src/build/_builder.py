@@ -170,6 +170,54 @@ def _wrap_subprocess_runner(runner: SubprocessRunner, env: env.IsolatedEnv) -> S
     return _invoke_wrapped_runner
 
 
+def _decode_stream(stream: str | bytes | None) -> str | None:
+    if isinstance(stream, bytes):
+        return stream.decode(errors='backslashreplace')
+    return stream
+
+
+class OutputCaptureRunner:
+    """
+    A PEP 517 subprocess runner that captures backend output instead of forwarding it to the terminal.
+
+    Unlike the default runner, which lets the backend write directly to the terminal, this runner
+    captures ``stdout`` and ``stderr`` separately and stores the most recently captured output on
+    the :attr:`stdout` and :attr:`stderr` attributes. If the backend process exits with a non-zero
+    status, the captured output is also attached to the raised :class:`subprocess.CalledProcessError`
+    and, through it, to :class:`build.BuildBackendException`.
+    """
+
+    def __init__(self) -> None:
+        self.stdout: str = ''
+        """Output captured from the most recent subprocess invocation's ``stdout``."""
+        self.stderr: str = ''
+        """Output captured from the most recent subprocess invocation's ``stderr``."""
+
+    def __call__(
+        self,
+        cmd: Sequence[str],
+        cwd: str | None = None,
+        extra_environ: Mapping[str, str] | None = None,
+    ) -> None:
+        env = dict(os.environ)
+        if extra_environ:
+            env.update(extra_environ)
+
+        process = subprocess.run(  # noqa: S603
+            cmd,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            check=False,
+            encoding='utf-8',
+            errors='backslashreplace',
+        )
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, process.args, output=process.stdout, stderr=process.stderr)
+
+
 class ProjectBuilder:
     """
     The PEP 517 consumer API.
@@ -196,7 +244,7 @@ class ProjectBuilder:
           which must be set for the subprocess execution.
 
         The default runner simply calls the backend hooks in a subprocess, writing backend output
-        to stdout/stderr.
+        to stdout/stderr. Use :class:`OutputCaptureRunner` to capture the output separately instead.
         """
         self._source_dir: str = os.path.abspath(source_dir)
         _validate_source_directory(source_dir)
@@ -413,6 +461,11 @@ class ProjectBuilder:
         except pyproject_hooks.BackendUnavailable as exception:
             raise BuildBackendException(exception, f"Backend '{self._backend}' is not available.") from None
         except subprocess.CalledProcessError as exception:
-            raise BuildBackendException(exception, f'Backend subprocess exited when trying to invoke {hook}') from None
+            raise BuildBackendException(
+                exception,
+                f'Backend subprocess exited when trying to invoke {hook}',
+                stdout=_decode_stream(exception.stdout),
+                stderr=_decode_stream(exception.stderr),
+            ) from None
         except Exception as exception:
             raise BuildBackendException(exception) from None

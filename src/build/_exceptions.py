@@ -22,10 +22,17 @@ class BuildBackendException(Exception):
         self,
         exception: Exception,
         description: str | None = None,
+        *,
+        stdout: str | None = None,
+        stderr: str | None = None,
     ) -> None:
         super().__init__()
         self.exception: Exception = exception
         self._description = description
+        self.stdout: str | None = stdout
+        """Output captured from the backend's ``stdout``, if a capturing runner was used."""
+        self.stderr: str | None = stderr
+        """Output captured from the backend's ``stderr``, if a capturing runner was used."""
 
     def __str__(self) -> str:
         if self._description:
