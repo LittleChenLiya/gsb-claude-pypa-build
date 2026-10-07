@@ -670,6 +670,101 @@ def test_metadata_path_no_prepare_build_tag(mocker: pytest_mock.MockerFixture, t
     assert os.path.isfile(os.path.join(metadata_dir, 'METADATA'))
 
 
+def _read_build_counter(path: pathlib.Path) -> int:
+    if not path.exists():
+        return 0
+    return int(path.read_text(encoding='utf-8'))
+
+
+def test_get_hook_capabilities_full(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, package_test_caps_full: str
+) -> None:
+    counter = tmp_path / 'build-count'
+    monkeypatch.setenv('BUILD_CAPS_COUNTER', str(counter))
+    builder = build.ProjectBuilder(package_test_caps_full)
+
+    capabilities = builder.get_hook_capabilities()
+
+    assert capabilities.available
+    assert capabilities.error is None
+    assert capabilities.hooks == {
+        'build_sdist',
+        'build_wheel',
+        'build_editable',
+        'get_requires_for_build_sdist',
+        'get_requires_for_build_wheel',
+        'get_requires_for_build_editable',
+        'prepare_metadata_for_build_wheel',
+        'prepare_metadata_for_build_editable',
+    }
+    assert not capabilities.metadata_fallback
+    # the capability query is read-only: it must not trigger any build
+    assert _read_build_counter(counter) == 0
+
+    # metadata comes from prepare_metadata_for_build_wheel, no fallback build
+    metadata_dir = builder.metadata_path(str(tmp_path / 'metadata'))
+    assert os.path.basename(metadata_dir) == 'test_caps_full-1.0.0.dist-info'
+    assert _read_build_counter(counter) == 0
+
+
+def test_get_hook_capabilities_no_prepare(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    package_test_caps_no_prepare: str,
+) -> None:
+    counter = tmp_path / 'build-count'
+    monkeypatch.setenv('BUILD_CAPS_COUNTER', str(counter))
+    caplog.set_level(logging.DEBUG)
+    builder = build.ProjectBuilder(package_test_caps_no_prepare)
+
+    capabilities = builder.get_hook_capabilities()
+
+    assert capabilities.available
+    assert capabilities.error is None
+    assert 'build_wheel' in capabilities.hooks
+    assert 'prepare_metadata_for_build_wheel' not in capabilities.hooks
+    # the caller can tell the metadata fallback will be used
+    assert capabilities.metadata_fallback
+    # the capability query is read-only: it must not trigger any build
+    assert _read_build_counter(counter) == 0
+
+    # the original fallback still works and builds exactly one wheel
+    metadata_dir = builder.metadata_path(str(tmp_path / 'metadata'))
+    metadata = _importlib.metadata.PathDistribution(pathlib.Path(metadata_dir)).metadata
+    assert metadata['name'] == 'test-caps-no-prepare'
+    assert metadata['Version'] == '1.0.0'
+    assert _read_build_counter(counter) == 1
+    assert 'falling back to building a wheel' in caplog.text
+
+
+def test_get_hook_capabilities_import_failure(packages_path: str) -> None:
+    builder = build.ProjectBuilder(os.path.join(packages_path, 'test-bad-backend'))
+
+    capabilities = builder.get_hook_capabilities()
+
+    # an unimportable backend is reported, not raised, and told apart from missing hooks
+    assert not capabilities.available
+    assert capabilities.hooks == frozenset()
+    assert capabilities.error is not None
+    assert 'nonsense_package' in capabilities.error
+    assert not capabilities.metadata_fallback
+
+
+def test_get_hook_capabilities_runner_error(package_test_flit: str) -> None:
+    def dummy_runner(
+        cmd: typing.Sequence[str],  # noqa: ARG001
+        cwd: str | None = None,  # noqa: ARG001
+        extra_environ: typing.Mapping[str, str] | None = None,  # noqa: ARG001
+    ) -> None:
+        msg = 'Runner was called'
+        raise RuntimeError(msg)
+
+    builder = build.ProjectBuilder(package_test_flit, runner=dummy_runner)
+    with pytest.raises(build.BuildBackendException, match='Runner was called'):
+        builder.get_hook_capabilities()
+
+
 def test_log(mocker: pytest_mock.MockerFixture, caplog: pytest.LogCaptureFixture, package_test_flit: str) -> None:
     mocker.patch('pyproject_hooks.BuildBackendHookCaller', autospec=True)
     mocker.patch('build.ProjectBuilder._call_backend', return_value='some_path')

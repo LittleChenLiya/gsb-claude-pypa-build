@@ -5,7 +5,9 @@ from __future__ import annotations
 
 __lazy_modules__ = {
     'difflib',
+    'json',
     'subprocess',
+    'tempfile',
     'warnings',
     'zipfile',
     f'{__spec__.parent}._compat',
@@ -15,9 +17,12 @@ __lazy_modules__ = {
 
 import contextlib
 import difflib
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import typing
 import warnings
 import zipfile
 
@@ -55,6 +60,74 @@ _DEFAULT_BACKEND: BuildSystemTable = {
     'build-backend': 'setuptools.build_meta:__legacy__',
     'requires': ['setuptools >= 40.8.0'],
 }
+
+# All hooks defined by PEP 517 and PEP 660, used by the capability probe.
+_KNOWN_HOOKS = (
+    'build_sdist',
+    'build_wheel',
+    'build_editable',
+    'get_requires_for_build_sdist',
+    'get_requires_for_build_wheel',
+    'get_requires_for_build_editable',
+    'prepare_metadata_for_build_wheel',
+    'prepare_metadata_for_build_editable',
+)
+
+# In-process probe run in a subprocess by ``ProjectBuilder.get_hook_capabilities``.
+# It imports the backend and records which hooks exist without invoking any of
+# them. A backend import failure is reported in the JSON report (with a zero
+# exit status) so it can be told apart from a subprocess-level failure.
+# Arguments: backend spec, report path, JSON list of hook names, JSON list of
+# backend-path entries.
+_CAPABILITIES_PROBE = """\
+import importlib
+import json
+import sys
+
+backend, _, attributes = sys.argv[1].partition(':')
+sys.path[:0] = json.loads(sys.argv[4])
+
+try:
+    target = importlib.import_module(backend)
+    for attribute in attributes.split('.'):
+        if attribute:
+            target = getattr(target, attribute)
+except BaseException as exception:
+    report = {'available': False, 'error': f'{type(exception).__name__}: {exception}'}
+else:
+    report = {
+        'available': True,
+        'hooks': [hook for hook in json.loads(sys.argv[3]) if hasattr(target, hook)],
+    }
+
+with open(sys.argv[2], 'w', encoding='utf-8') as report_file:
+    json.dump(report, report_file)
+"""
+
+
+class HookCapabilities(typing.NamedTuple):
+    """
+    Read-only report of the PEP 517 hooks a build backend implements, as
+    returned by :meth:`ProjectBuilder.get_hook_capabilities`.
+    """
+
+    available: bool
+    """Whether the backend could be imported."""
+
+    hooks: frozenset[str]
+    """Names of the hooks the backend implements (empty if it is not available)."""
+
+    error: str | None = None
+    """Description of the backend import failure, if it is not available."""
+
+    @property
+    def metadata_fallback(self) -> bool:
+        """
+        Whether :meth:`ProjectBuilder.metadata_path` will fall back to building
+        a wheel because the backend does not implement
+        ``prepare_metadata_for_build_wheel``.
+        """
+        return self.available and 'prepare_metadata_for_build_wheel' not in self.hooks
 
 
 def _is_list_of_str(value: object) -> TypeGuard[list[str]]:
@@ -296,6 +369,50 @@ class ProjectBuilder:
         dependencies = self.get_requires_for_build(distribution, config_settings).union(self.build_system_requires)
         return {u for d in dependencies for u in check_dependency(d)}
 
+    def get_hook_capabilities(self) -> HookCapabilities:
+        """
+        Query the build backend for the PEP 517 hooks it implements.
+
+        The backend is imported in a subprocess and inspected for the known
+        hooks; no hook is invoked, so this is a read-only operation that never
+        triggers a build.
+
+        :returns: A :class:`HookCapabilities` report. If the backend cannot be
+            imported, ``available`` is ``False`` and ``error`` describes the
+            import failure; otherwise ``hooks`` contains the implemented hook
+            names. A missing hook (reported via ``hooks``) is therefore
+            distinguishable from an unusable backend (reported via
+            ``available`` and ``error``).
+        """
+        backend_path = [os.path.join(self._source_dir, path) for path in self._build_system.get('backend-path', [])]
+        with tempfile.TemporaryDirectory(prefix='python-build-hooks-') as tmp:
+            probe = os.path.join(tmp, 'probe.py')
+            report_path = os.path.join(tmp, 'report.json')
+            with open(probe, 'w', encoding='utf-8') as file:
+                file.write(_CAPABILITIES_PROBE)
+            with self._handle_backend('get_hook_capabilities'):
+                self._runner(
+                    [
+                        self._python_executable,
+                        probe,
+                        self._backend,
+                        report_path,
+                        json.dumps(sorted(_KNOWN_HOOKS)),
+                        json.dumps(backend_path),
+                    ],
+                    self._source_dir,
+                    None,
+                )
+            try:
+                with open(report_path, encoding='utf-8') as file:
+                    report = json.load(file)
+            except (OSError, ValueError) as exception:
+                msg = f"Backend '{self._backend}' did not produce a valid capability report"
+                raise BuildException(msg) from exception
+        if not report['available']:
+            return HookCapabilities(available=False, hooks=frozenset(), error=str(report['error']))
+        return HookCapabilities(available=True, hooks=frozenset(report['hooks']))
+
     def prepare(
         self,
         distribution: Distribution,
@@ -362,6 +479,10 @@ class ProjectBuilder:
             return metadata
 
         # fallback to build_wheel hook
+        _ctx.log(
+            'Backend does not implement prepare_metadata_for_build_wheel, falling back to building a wheel...',
+            kind=('step',),
+        )
         wheel = self.build('wheel', output_directory, config_settings)
         try:
             whl = zipfile.ZipFile(wheel)

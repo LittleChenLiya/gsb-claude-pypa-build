@@ -1,0 +1,4 @@
+Add ``ProjectBuilder.get_hook_capabilities``, a read-only query reporting which PEP 517 hooks the build backend
+implements. It distinguishes a backend that cannot be imported from one missing optional hooks, never triggers a
+build, and its ``metadata_fallback`` flag tells callers whether ``ProjectBuilder.metadata_path`` will fall back to
+building a wheel

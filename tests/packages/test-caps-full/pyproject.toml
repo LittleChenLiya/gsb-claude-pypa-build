@@ -1,0 +1,9 @@
+[build-system]
+build-backend = 'backend_caps_full'
+backend-path = ['.']
+requires = []
+
+[project]
+name = "test-caps-full"
+version = "1.0.0"
+description = "Test capability query against a backend implementing all hooks"

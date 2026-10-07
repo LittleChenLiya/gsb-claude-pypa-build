@@ -83,6 +83,21 @@ Getting package metadata without building:
         metadata_dir = builder.metadata_path(tmpdir)
         # Read METADATA file from metadata_dir to extract package info
 
+Querying which hooks a backend implements (read-only, never triggers a build):
+
+.. code-block:: python
+
+    from build import ProjectBuilder
+
+    builder = ProjectBuilder(".")
+    capabilities = builder.get_hook_capabilities()
+    if not capabilities.available:
+        print(f"Backend cannot be imported: {capabilities.error}")
+    else:
+        print(f"Implemented hooks: {sorted(capabilities.hooks)}")
+        if capabilities.metadata_fallback:
+            print("metadata_path() will fall back to building a wheel")
+
 Accessing build dependencies:
 
 .. code-block:: python

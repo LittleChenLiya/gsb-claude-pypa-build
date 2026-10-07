@@ -12,7 +12,7 @@ __lazy_modules__ = {
     f'{__spec__.parent}._util',
 }
 
-from ._builder import ProjectBuilder
+from ._builder import HookCapabilities, ProjectBuilder
 from ._exceptions import (
     BuildBackendException,
     BuildException,
@@ -35,6 +35,7 @@ __all__ = [
     'ConfigSettingsType',
     'DistributionType',
     'FailedProcessError',
+    'HookCapabilities',
     'ProjectBuilder',
     'RunnerType',
     'TypoWarning',
